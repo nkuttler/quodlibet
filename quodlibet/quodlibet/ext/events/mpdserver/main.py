@@ -5,11 +5,16 @@
 # it under the terms of version 2 of the GNU General Public License as
 # published by the Free Software Foundation.
 
+import itertools
+import os
 import re
 import shlex
+import time
+from datetime import datetime
 
 from quodlibet import const
 from quodlibet.util import print_d, print_w
+from quodlibet.query import Query
 from .tcpserver import BaseTCPServer, BaseTCPConnection
 
 
@@ -81,9 +86,20 @@ def format_tags(song):
             value = song.comma(ql_key) or None
 
         if value is not None:
+            if mpd_key == u"Time":
+                value = int(float(value))
             lines.append(u"%s: %s" % (mpd_key, value))
 
     return u"\n".join(lines)
+
+
+def write_song(conn, song):
+    mtime = _parse_mtime(song.get('~#mtime'))
+    parts = []
+    parts.append(format_tags(song))
+    parts.append(u"file: %s" % song("~filename"))
+    parts.append(u"Last-Modified: %s" % mtime)
+    conn.write_line(u"\n".join(parts))
 
 
 class ParseError(Exception):
@@ -383,6 +399,92 @@ class MPDService(object):
             parts.append(u"Id: %d" % self._get_id(info))
             return u"\n".join(parts)
 
+    def search(self, string):
+        if not string:
+            return None
+        print_d('querystring {}'.format(string))
+        return Query(string).filter(self._app.library)
+
+    def find(self, string):
+        return self.search(string)
+
+    def count(self, conn, service, args):
+        return get_items(service, args)
+
+    def enqueue_song(self, path):
+        """Find song by filename. Should check the path as well
+        """
+        filename = os.path.basename(path)
+        query = '~filename=/{}/'.format(filename)
+        song = self.search(query)
+        self._app.window.playlist.enqueue(song)
+
+    def clear_queue(self):
+        for row in self._app.window.playlist.q:
+            for song in row:
+                self._app.window.playlist.unqueue([song])
+
+    def list_artists_for_genre(self, genre):
+        """Return artists for a genre"""
+        artists = set()
+        for album in self._app.library.albums:
+            if album.get('genre') == genre:
+                artists.add(album.get('artist'))
+        return artists
+
+    def list_albums_for_artist(self, artist):
+        """Return albums for an artist"""
+        albums = set()
+        for album in self._app.library.albums:
+            if album.get('artist') == artist:
+                albums.add(album.get('album'))
+        return albums
+
+    def list_things(self, field):
+        """Return a set of any type in the library
+        """
+        r = set()
+        for album in self._app.library.albums:
+            r.add(album.get(field))
+        return r
+
+    def listallinfo(self, conn, args):
+        """List all songs. Hacky query..
+        """
+        for song in self.search('#(skipcount >= 0)'):
+            write_song(conn, song)
+
+    def lsinfo(self, conn, service, args):
+        # Implement Genre/Artist/Album
+        args = args[0].split('/')
+        tax = 'genre'
+        genre = args[0]
+        now = datetime.now()
+        mtime = now.strftime('%Y-%m-%dT%H:%M:%SZ')
+        artist = args[1] if len(args) > 1 else False
+        album = args[2] if len(args) > 2 else False
+        if tax == 'genre' and album:
+            args = ('genre', genre, 'artist', artist, 'album', album)
+            querystring = _pairwise_querystring(args)
+            for song in service.search(querystring):
+                write_song(conn, song)
+        elif tax == 'genre' and artist:
+            albums = self.list_albums_for_artist(artist)
+            for album in albums:
+                conn.write_line(u'directory: %s/%s/%s' % (genre, artist, album))
+        elif tax == 'genre' and genre:
+            artists = self.list_artists_for_genre(genre)
+            for artist in artists:
+                conn.write_line(u'directory: %s/%s' % (genre, artist))
+                conn.write_line(u'Last-Modified: %s' % mtime)
+        else:
+            items = self.list_things(tax)
+            for item in items:
+                if not item:
+                    item = 'Undefined'
+                item = _sanitize(item)
+                conn.write_line(u'directory: %s' % item)
+                conn.write_line(u'Last-Modified: %s' % mtime)
 
 class MPDServer(BaseTCPServer):
 
@@ -561,6 +663,7 @@ class MPDConnection(BaseTCPConnection):
             self._exec_command(command, args)
 
     def _exec_command(self, command, args, no_ack=False):
+
         self._command = command
 
         if command not in self._commands:
@@ -643,6 +746,16 @@ def _parse_range(arg):
         raise MPDRequestError("invalid range")
 
 
+def _parse_length(arg):
+    "Some songs have None here, not sure why. Filetype?"
+    if arg is not None:
+        return int(arg)
+    return 0
+
+def _parse_mtime(arg):
+    return time.strftime('%Y-%m-%dT%H:%M:%SZ',  time.gmtime(float(arg)))
+
+
 @MPDConnection.Command("idle", ack=False)
 def _cmd_idle(conn, service, args):
     service.register_idle(conn, args)
@@ -680,9 +793,132 @@ def _cmd_listplaylists(conn, service, args):
     pass
 
 
+def _sanitize(value):
+    "Newlines in tags are bad"
+    return value.replace('\n', ' ')
+
+
+def _pairwise(iterable):
+    "s -> (s0,s1), (s1,s2), (s2, s3), ..."
+    a = iter(iterable)
+    return itertools.izip(a, a)
+
+def _pairwise_querystring(args):
+    """Build a query string. A special case is that mpd falls back
+    to the artist tag when querying for albumartist and that tag is empty.
+    """
+    params = []
+    if len(args) == 2 and args[0].title() == 'Any':
+        return '/{}/'.format(args[1])
+    for key, value in _pairwise(args):
+        value = value.replace('(', '\(')
+        value = value.replace(')', '\)')
+        if key.lower() == 'albumartist':
+            params.append("|(artist=/{}/, albumartist={}".format(value))
+        else:
+            params.append("{0}=/{1}/".format(key, value))
+    querystring = '&({0})'.format(','.join(params))
+    print_d("paired querystring", querystring)
+    return querystring
+
+def get_items(service, args):
+    """The search, find and count commands looks like this:
+
+    <command> <type> key value key value ...
+
+    or
+
+    <command> <type> value
+
+    Searching for different types returns different output.
+
+    The find command should be case sensitive.
+
+    find {TYPE} {WHAT} [...] [window START:END]
+
+
+    """
+    q = args[0].title()
+    if q == 'Genre':
+        _verify_length(args, 0)
+        return service.list_things('genre')
+    elif q == 'Artist':
+        if len(args) >= 3:
+            # WTF guessing here?
+            genre = args[2]
+            return service.list_artists_for_genre(genre)
+        elif len(args) == 2:
+            artist = _sanitize(args[1])
+            if len(artist) > 3:
+                querystring = _pairwise_querystring(('artist', artist))
+                return service.search(querystring)
+            else:
+                print_d('Refuse to search for "{}"'.format(artist))
+        else:
+            _verify_length(args, 0)
+            return service.list_things('artist')
+    elif q == 'Albumartist':
+        if len(args) >= 3:
+            args.pop(0)
+            querystring = _pairwise_querystring(args)
+            artists = set()
+            for song in service.search(querystring):
+                artists.add(song.get('artist'))
+            return artists
+        else:
+            print_d("Not implemented: list", args)
+    elif q == 'Album':
+        if len(args) >= 3:
+            args.pop(0)
+            querystring = _pairwise_querystring(args)
+            albums = set()
+            for song in service.search(querystring):
+                albums.add(song.get('album'))
+            return albums
+        elif len(args) == 2:
+            album = args[1]
+            querystring = '/%s/' % album
+            songs = service.search(querystring)
+            albums = set()
+            for song in service.search(querystring):
+                albums.add(song.get('album'))
+            return albums
+    else:
+        print_d("Not implemented: list", args)
+        return []
+
+
 @MPDConnection.Command("list")
 def _cmd_list(conn, service, args):
-    pass
+    items = get_items(service, args)
+    q = args[0].title()
+    if q == 'Genre':
+        for genre in items:
+            genre = _sanitize(genre)
+            conn.write_line(u'Genre: %s' % genre)
+    elif q == 'Artist':
+        if len(args) >= 3:
+            for artist in items:
+                artist = _sanitize(artist)
+                conn.write_line(u'Artist: %s' % artist)
+        elif len(args) == 2:
+            for artist in items:
+                conn.write_line(u'Artist: %s' % artist)
+        else:
+            for artist in items:
+                artist = _sanitize(artist)
+                conn.write_line(u'Artist: %s' % artist)
+    elif q == 'Albumartist':
+        if len(args) >= 3:
+            for artist in items:
+                conn.write_line(u'AlbumArtist: {}'.format(artist))
+        else:
+            print_d("Not implemented: list", args)
+    elif q == 'Album':
+        for album in items:
+            conn.write_line(u'Album: {}'.format(album))
+    else:
+        print_d("Not implemented: list", args)
 
 
 @MPDConnection.Command("playid")
@@ -767,8 +1003,9 @@ def _cmd_currentsong(conn, service, args):
 
 @MPDConnection.Command("count")
 def _cmd_count(conn, service, args):
-    conn.write_line(u"songs: 0")
-    conn.write_line(u"playtime: 0")
+    items = service.count(conn, service, args)
+    conn.write(u'songs: {}'.format(len(items)))
+    conn.write(u'list_OK')
 
 
 @MPDConnection.Command("plchanges")
@@ -790,8 +1027,11 @@ def _cmd_plchangesposid(conn, service, args):
 
 
 @MPDConnection.Command("listallinfo")
-def _cmd_listallinfo(*args):
-    _cmd_currentsong(*args)
+def _cmd_listallinfo(conn, service, args):
+    """listallinfo traverses the library filesystem and outputs data
+    on each directory and file.
+    """
+    service.listallinfo(conn, args)
 
 
 @MPDConnection.Command("seek")
@@ -849,7 +1089,9 @@ def _cmd_tagtypes(conn, service, args):
 
 @MPDConnection.Command("lsinfo")
 def _cmd_lsinfo(conn, service, args):
+    "List directory contents"
     _verify_length(args, 1)
+    return service.lsinfo(conn, service, args)
 
 
 @MPDConnection.Command("playlistinfo")
@@ -873,3 +1115,29 @@ def _cmd_playlistid(conn, service, args):
     result = service.playlistid(songid)
     if result is not None:
         conn.write_line(result)
+
+
+@MPDConnection.Command("search")
+def _cmd_search(conn, service, args):
+    querystring = _pairwise_querystring(args)
+    results = service.search(querystring)
+    if results:
+        print_d("Found {0} results for {1}".format(len(results), args))
+        for item in results:
+            write_song(conn, item)
+
+
+@MPDConnection.Command("find")
+def _cmd_find(conn, service, args):
+    return _cmd_search(conn, service, args)
+
+
+@MPDConnection.Command("add")
+def _cmd_add(conn, service, args):
+    service.enqueue_song(args[0])
+    return _cmd_search(conn, service, args)
+
+
+@MPDConnection.Command("clear")
+def _cmd_clear(conn, service, args):
+    return service.clear_queue()

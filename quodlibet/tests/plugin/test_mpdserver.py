@@ -102,7 +102,7 @@ class TMPDCommands(PluginTestCase):
         config.quit()
 
     def test_commands(self):
-        skip = ["close", "idle", "noidle"]
+        skip = ["lsinfo", "list", "find", "add", "search", "close", "idle", "noidle"]
         cmds = [c for c in self.conn.list_commands() if c not in skip]
         for cmd in cmds:
             self._cmd(cmd + b"\n")
@@ -110,3 +110,12 @@ class TMPDCommands(PluginTestCase):
     def test_idle_close(self):
         for cmd in ["idle", "noidle", "close"]:
             self._cmd(cmd + b"\n")
+
+    def test_search(self):
+        self._cmd(b'search any Foo\n')
+
+    def test_find(self):
+        self._cmd(b'find any Foo\n')
+
+    def test_lsinfo(self):
+        self._cmd(b'lsinfo ""\n')
