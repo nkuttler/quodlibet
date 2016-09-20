@@ -492,6 +492,35 @@ class MPDService(object):
                 conn.write_line(u'directory: %s' % item)
                 conn.write_line(u'Last-Modified: %s' % mtime)
 
+    def listplaylists(self, conn, service, args):
+        """Return all playlists. The Last-Modified line is
+        required. If we could get the real one that would be great.
+        """
+        from quodlibet.browsers.playlists import PlaylistsBrowser
+        browser = PlaylistsBrowser(service._app.library)
+        for playlist in browser.playlists():
+            mtime = _format_mtime(os.path.getmtime(playlist.filename))
+            filename = os.path.basename(playlist.filename)
+            conn.write_line(u'playlist: %s' % filename)
+            conn.write_line(u'Last-Modified: %s' % mtime)
+
+    def listplaylistinfo(self, conn, service, args):
+        """listplaylistinfo lists all songs in a playlist
+        """
+        from quodlibet.browsers.playlists import PlaylistsBrowser
+        from quodlibet.browsers.playlists.util import PLAYLISTS
+        browser = PlaylistsBrowser(service._app.library)
+        playlist = os.path.join(PLAYLISTS, args[0])
+        for songfile in open(playlist, 'r'):
+            songfile = songfile.rstrip()
+            songfile = songfile.replace('/', '\/')
+            query = '~filename=/{}/'.format(songfile)
+            songs = self.search(query)
+            if len(songs):
+                print conn
+                write_song(conn, songs[0])
+
+
 class MPDServer(BaseTCPServer):
 
     def __init__(self, app, config, port):
@@ -804,7 +833,12 @@ def _cmd_play(conn, service, args):
 
 @MPDConnection.Command("listplaylists")
 def _cmd_listplaylists(conn, service, args):
-    pass
+    service.listplaylists(conn, service, args)
+
+
+@MPDConnection.Command("listplaylistinfo")
+def _cmd_listplayinfo(conn, service, args):
+    service.listplaylistinfo(conn, service, args)
 
 
 def _sanitize(value):

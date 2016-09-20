@@ -102,7 +102,8 @@ class TMPDCommands(PluginTestCase):
         config.quit()
 
     def test_commands(self):
-        skip = ["lsinfo", "list", "find", "add", "search", "close", "idle", "noidle"]
+        skip = ["listplaylistinfo", "lsinfo", "list", "find", "add", "search",
+                "close", "idle", "noidle"]
         cmds = [c for c in self.conn.list_commands() if c not in skip]
         for cmd in cmds:
             self._cmd(cmd + b"\n")
@@ -119,3 +120,9 @@ class TMPDCommands(PluginTestCase):
 
     def test_lsinfo(self):
         self._cmd(b'lsinfo ""\n')
+
+    def test_listplaylits(self):
+        from quodlibet.formats._audio import AudioFile
+        from quodlibet.util.collection import Playlist
+        pl = Playlist("foo")
+        pl.extend([AudioFile({"~filename": "/dev/null"})])
