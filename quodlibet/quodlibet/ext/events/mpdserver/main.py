@@ -13,7 +13,7 @@ import time
 from datetime import datetime
 
 from quodlibet import const
-from quodlibet.util import print_d, print_w
+from quodlibet.util import print_d, print_w, print_e
 from quodlibet.query import Query
 from .tcpserver import BaseTCPServer, BaseTCPConnection
 
@@ -97,9 +97,15 @@ def write_song(conn, song):
     mtime = _format_mtime(song.get('~#mtime'))
     parts = []
     parts.append(format_tags(song))
-    parts.append(u"file: %s" % song("~filename"))
-    parts.append(u"Last-Modified: %s" % mtime)
-    conn.write_line(u"\n".join(parts))
+    filename = song("~filename")
+    try:
+        filename = filename.encode('utf-8')
+    except UnicodeDecodeError:
+        print_e(u"Error encoding file %s" % repr(filename))
+    else:
+        parts.append(u"file: %s" % filename)
+        parts.append(u"Last-Modified: %s" % mtime)
+        conn.write_line(u"\n".join(parts))
 
 
 class ParseError(Exception):
@@ -924,7 +930,8 @@ def _cmd_list(conn, service, args):
             print_d("Not implemented: list", args)
     elif q == 'Album':
         for album in items:
-            conn.write_line(u'Album: {}'.format(album))
+            if album:  # Why do we get None here?
+                conn.write_line(u'Album: {}'.format(album))
     else:
         print_d("Not implemented: list", args)
 
