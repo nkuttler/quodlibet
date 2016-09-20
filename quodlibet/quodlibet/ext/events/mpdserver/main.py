@@ -94,7 +94,7 @@ def format_tags(song):
 
 
 def write_song(conn, song):
-    mtime = _parse_mtime(song.get('~#mtime'))
+    mtime = _format_mtime(song.get('~#mtime'))
     parts = []
     parts.append(format_tags(song))
     parts.append(u"file: %s" % song("~filename"))
@@ -460,7 +460,7 @@ class MPDService(object):
         tax = 'genre'
         genre = args[0]
         now = datetime.now()
-        mtime = now.strftime('%Y-%m-%dT%H:%M:%SZ')
+        mtime = _format_mtime(now)
         artist = args[1] if len(args) > 1 else False
         album = args[2] if len(args) > 2 else False
         if tax == 'genre' and album:
@@ -752,8 +752,16 @@ def _parse_length(arg):
         return int(arg)
     return 0
 
-def _parse_mtime(arg):
-    return time.strftime('%Y-%m-%dT%H:%M:%SZ',  time.gmtime(float(arg)))
+
+def _format_mtime(arg):
+    """Formats a datetime objects how mpd likes it"""
+    if isinstance(arg, datetime):
+        mtime = float(arg.strftime('%s'))
+    elif isinstance(arg, str):
+        mtime = float(arg)
+    elif isinstance(arg, float):
+        mtime = arg
+    return time.strftime('%Y-%m-%dT%H:%M:%SZ',  time.gmtime(mtime))
 
 
 @MPDConnection.Command("idle", ack=False)
